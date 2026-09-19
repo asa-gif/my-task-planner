@@ -1,0 +1,960 @@
+import { useEffect, useMemo, useState } from 'react'
+import { supabase } from './lib/supabase'
+import './App.css'
+
+const YEAR_OPTIONS = [2026, 2027, 2028, 2029, 2030]
+const MONTH_NAMES = [
+  'January',
+  'February',
+  'March',
+  'April',
+  'May',
+  'June',
+  'July',
+  'August',
+  'September',
+  'October',
+  'November',
+  'December',
+]
+const WEEK_POSITIONS = ['First Week', 'Second Week', 'Third Week', 'Fourth Week', 'Fifth Week']
+const WEEKDAY_NAMES = ['Saturday', 'Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday']
+const STORAGE_KEY = 'my-task-planner-data'
+const STORAGE_VERSION = 1
+
+type TaskType = 'temporary' | 'permanent'
+
+type Task = {
+  id: string
+  title: string
+  type: TaskType
+  dateKey?: string
+  recurrenceKey?: string
+  exceptions: Record<string, boolean>
+  completionByDate: Record<string, boolean>
+}
+
+type DayCard = {
+  dateKey: string
+  label: string
+  day: number
+  monthIndex: number
+  year: number
+  isCurrentMonth: boolean
+}
+
+function createId() {
+  if (typeof crypto !== 'undefined' && 'randomUUID' in crypto) {
+    return crypto.randomUUID()
+  }
+
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (character) => {
+    const random = Math.random() * 16 | 0
+    const value = character === 'x' ? random : (random & 0x3 | 0x8)
+    return value.toString(16)
+  })
+}
+
+function formatDateKey(date: Date) {
+  const year = date.getFullYear()
+  const month = String(date.getMonth() + 1).padStart(2, '0')
+  const day = String(date.getDate()).padStart(2, '0')
+  return `${year}-${month}-${day}`
+}
+
+function parseDateKey(dateKey: string) {
+  const [year, month, day] = dateKey.split('-').map(Number)
+  return new Date(year, month - 1, day)
+}
+
+function buildSampleTasks(): Task[] {
+  return [
+    {
+      id: 'sample-monthly-quality-review',
+      title: 'Monthly Quality Review',
+      type: 'permanent',
+      recurrenceKey: 'First Week|Saturday',
+      exceptions: {},
+      completionByDate: {},
+    },
+    {
+      id: 'sample-weekly-planning',
+      title: 'Weekly Planning',
+      type: 'permanent',
+      recurrenceKey: 'First Week|Monday',
+      exceptions: {},
+      completionByDate: {},
+    },
+    {
+      id: 'sample-kpi-review',
+      title: 'KPI Review',
+      type: 'permanent',
+      recurrenceKey: 'Second Week|Wednesday',
+      exceptions: {},
+      completionByDate: {},
+    },
+    {
+      id: 'sample-monthly-report',
+      title: 'Monthly Report',
+      type: 'permanent',
+      recurrenceKey: 'Fourth Week|Thursday',
+      exceptions: {},
+      completionByDate: {},
+    },
+    {
+      id: 'sample-prepare-presentation',
+      title: 'Prepare Presentation',
+      type: 'temporary',
+      dateKey: '2026-09-19',
+      exceptions: {},
+      completionByDate: {},
+    },
+    {
+      id: 'sample-check-emails',
+      title: 'Check Emails',
+      type: 'temporary',
+      dateKey: '2026-09-20',
+      exceptions: {},
+      completionByDate: {},
+    },
+  ]
+}
+
+type DbTaskRow = {
+  id: string
+  title: string
+  type: TaskType
+  task_date: string | null
+  recurrence_week: string | null
+  recurrence_day: string | null
+}
+
+type DbExceptionRow = {
+  task_id: string
+  exception_date: string
+  action: string
+}
+
+type DbCompletionRow = {
+  task_id: string
+  occurrence_date: string
+  completed: boolean
+}
+
+function readTasksFromLocalStorage(): Task[] {
+  if (typeof window === 'undefined') {
+    return []
+  }
+
+  try {
+    const saved = window.localStorage.getItem(STORAGE_KEY)
+    if (!saved) {
+      const sampleTasks = buildSampleTasks()
+      window.localStorage.setItem(
+        STORAGE_KEY,
+        JSON.stringify({ version: STORAGE_VERSION, tasks: sampleTasks }),
+      )
+      return sampleTasks
+    }
+
+    const parsed = JSON.parse(saved)
+    if (parsed && Array.isArray(parsed.tasks)) {
+      return parsed.tasks
+    }
+
+    if (Array.isArray(parsed)) {
+      return parsed
+    }
+
+    const sampleTasks = buildSampleTasks()
+    window.localStorage.setItem(
+      STORAGE_KEY,
+      JSON.stringify({ version: STORAGE_VERSION, tasks: sampleTasks }),
+    )
+    return sampleTasks
+  } catch {
+    return buildSampleTasks()
+  }
+}
+
+async function loadTasksFromSupabase(): Promise<Task[]> {
+  const [{ data: taskRows, error: taskError }, { data: exceptionRows, error: exceptionError }, { data: completionRows, error: completionError }] = await Promise.all([
+    supabase.from('tasks').select('id, title, type, task_date, recurrence_week, recurrence_day'),
+    supabase.from('task_exceptions').select('task_id, exception_date, action'),
+    supabase.from('task_completions').select('task_id, occurrence_date, completed'),
+  ])
+
+  if (taskError || exceptionError || completionError) {
+    throw new Error('Supabase sync failed')
+  }
+
+  const taskMap = new Map<string, Task>()
+
+  ;(taskRows ?? []).forEach((row: DbTaskRow) => {
+    const task: Task = {
+      id: row.id,
+      title: row.title,
+      type: row.type,
+      dateKey: row.type === 'temporary' ? row.task_date ?? undefined : undefined,
+      recurrenceKey:
+        row.type === 'permanent' && row.recurrence_week && row.recurrence_day
+          ? `${row.recurrence_week}|${row.recurrence_day}`
+          : undefined,
+      exceptions: {},
+      completionByDate: {},
+    }
+
+    taskMap.set(task.id, task)
+  })
+
+  ;(exceptionRows ?? []).forEach((row: DbExceptionRow) => {
+    const task = taskMap.get(row.task_id)
+    if (!task) {
+      return
+    }
+
+    task.exceptions[row.exception_date] = true
+  })
+
+  ;(completionRows ?? []).forEach((row: DbCompletionRow) => {
+    const task = taskMap.get(row.task_id)
+    if (!task || !row.completed) {
+      return
+    }
+
+    task.completionByDate[row.occurrence_date] = true
+  })
+
+  const tasks = Array.from(taskMap.values())
+  return tasks.length > 0 ? tasks : readTasksFromLocalStorage()
+}
+
+async function syncTasksToSupabase(tasks: Task[]) {
+  const taskRows = tasks.map((task) => ({
+    id: task.id,
+    title: task.title,
+    type: task.type,
+    task_date: task.type === 'temporary' ? task.dateKey ?? null : null,
+    recurrence_week:
+      task.type === 'permanent' && task.recurrenceKey ? task.recurrenceKey.split('|')[0] : null,
+    recurrence_day:
+      task.type === 'permanent' && task.recurrenceKey ? task.recurrenceKey.split('|')[1] : null,
+  }))
+
+  const { error: taskError } = await supabase.from('tasks').upsert(taskRows, { onConflict: 'id' })
+  if (taskError) {
+    throw taskError
+  }
+
+  const exceptionRows = tasks.flatMap((task) =>
+    Object.entries(task.exceptions)
+      .filter(([, enabled]) => enabled)
+      .map(([date]) => ({
+        task_id: task.id,
+        exception_date: date,
+        action: 'hidden',
+      })),
+  )
+
+  const completionRows = tasks.flatMap((task) =>
+    Object.entries(task.completionByDate)
+      .filter(([, completed]) => completed)
+      .map(([date]) => ({
+        task_id: task.id,
+        occurrence_date: date,
+        completed: true,
+      })),
+  )
+
+  const taskIds = tasks.map((task) => task.id)
+  if (taskIds.length > 0) {
+    const { error: deleteExceptionsError } = await supabase
+      .from('task_exceptions')
+      .delete()
+      .in('task_id', taskIds)
+
+    if (deleteExceptionsError) {
+      throw deleteExceptionsError
+    }
+
+    const { error: deleteCompletionsError } = await supabase
+      .from('task_completions')
+      .delete()
+      .in('task_id', taskIds)
+
+    if (deleteCompletionsError) {
+      throw deleteCompletionsError
+    }
+  }
+
+  if (exceptionRows.length > 0) {
+    const { error: exceptionError } = await supabase.from('task_exceptions').upsert(exceptionRows, {
+      onConflict: 'task_id,exception_date',
+    })
+
+    if (exceptionError) {
+      throw exceptionError
+    }
+  }
+
+  if (completionRows.length > 0) {
+    const { error: completionError } = await supabase.from('task_completions').upsert(completionRows, {
+      onConflict: 'task_id,occurrence_date',
+    })
+
+    if (completionError) {
+      throw completionError
+    }
+  }
+
+  if (typeof window !== 'undefined') {
+    window.localStorage.setItem(STORAGE_KEY, JSON.stringify({ version: STORAGE_VERSION, tasks }))
+  }
+}
+
+function getAvailableMonthsForYear(year: number) {
+  return year === 2026 ? [8, 9, 10, 11] : [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
+}
+
+function getDateInfoFromKey(dateKey: string) {
+  const date = parseDateKey(dateKey)
+  const dayNumber = date.getDate()
+  const weekIndex = Math.min(4, Math.floor((dayNumber - 1) / 7))
+  const dayIndexInWeek = (dayNumber - 1) % 7
+
+  return {
+    year: date.getFullYear(),
+    monthIndex: date.getMonth(),
+    day: date.getDate(),
+    weekday: WEEKDAY_NAMES[dayIndexInWeek],
+    weekLabel: WEEK_POSITIONS[weekIndex],
+    weekIndex,
+  }
+}
+
+function getWeekDates(year: number, monthIndex: number, weekIndex: number): DayCard[] {
+  const startDay = weekIndex * 7 + 1
+
+  return Array.from({ length: 7 }, (_, index) => {
+    const virtualDay = startDay + index
+    const currentDate = new Date(year, monthIndex, virtualDay)
+
+    return {
+      dateKey: formatDateKey(currentDate),
+      label: WEEKDAY_NAMES[index],
+      day: virtualDay,
+      monthIndex: currentDate.getMonth(),
+      year: currentDate.getFullYear(),
+      isCurrentMonth: currentDate.getMonth() === monthIndex,
+    }
+  })
+}
+
+function isTaskCompleted(task: Task, dateKey: string) {
+  return Boolean(task.completionByDate[dateKey])
+}
+
+function getVisibleTasksForDate(dateKey: string, tasks: Task[]) {
+  const info = getDateInfoFromKey(dateKey)
+
+  return tasks.filter((task) => {
+    if (task.type === 'temporary') {
+      return task.dateKey === dateKey
+    }
+
+    if (!task.recurrenceKey) {
+      return false
+    }
+
+    const isMatchingRecurrence = task.recurrenceKey === `${info.weekLabel}|${info.weekday}`
+    const isTemporarilyRemoved = Boolean(task.exceptions[dateKey])
+
+    return isMatchingRecurrence && !isTemporarilyRemoved
+  })
+}
+
+function App() {
+  const [year, setYear] = useState(2026)
+  const [monthIndex, setMonthIndex] = useState(8)
+  const [weekIndex, setWeekIndex] = useState(0)
+  const [tasks, setTasks] = useState<Task[]>([])
+  const [isTaskModalOpen, setIsTaskModalOpen] = useState(false)
+  const [selectedDateKey, setSelectedDateKey] = useState('')
+  const [newTaskTitle, setNewTaskTitle] = useState('')
+  const [newTaskType, setNewTaskType] = useState<TaskType>('temporary')
+  const [deleteTarget, setDeleteTarget] = useState<{ task: Task; dateKey: string } | null>(null)
+  const [editTarget, setEditTarget] = useState<{ task: Task; dateKey: string } | null>(null)
+  const [editedTaskTitle, setEditedTaskTitle] = useState('')
+  const [editMode, setEditMode] = useState<'occurrence' | 'all'>('all')
+  const [addTaskError, setAddTaskError] = useState('')
+
+  const todayKey = useMemo(() => formatDateKey(new Date()), [])
+
+  useEffect(() => {
+    let isMounted = true
+
+    const load = async () => {
+      try {
+        const nextTasks = await loadTasksFromSupabase()
+        if (isMounted) {
+          setTasks(nextTasks)
+        }
+      } catch {
+        const fallbackTasks = readTasksFromLocalStorage()
+        if (isMounted) {
+          setTasks(fallbackTasks)
+        }
+      }
+    }
+
+    load()
+
+    return () => {
+      isMounted = false
+    }
+  }, [])
+
+  useEffect(() => {
+    if (tasks.length === 0) {
+      if (typeof window !== 'undefined') {
+        window.localStorage.setItem(STORAGE_KEY, JSON.stringify({ version: STORAGE_VERSION, tasks: [] }))
+      }
+      return
+    }
+
+    syncTasksToSupabase(tasks).catch(() => {
+      if (typeof window !== 'undefined') {
+        window.localStorage.setItem(STORAGE_KEY, JSON.stringify({ version: STORAGE_VERSION, tasks }))
+      }
+    })
+  }, [tasks])
+
+  const monthOptions = useMemo(() => getAvailableMonthsForYear(year), [year])
+  const weekDates = useMemo(() => getWeekDates(year, monthIndex, weekIndex), [year, monthIndex, weekIndex])
+
+  const handleYearSelect = (nextYear: number) => {
+    setYear(nextYear)
+    setWeekIndex(0)
+
+    if (nextYear === 2026) {
+      setMonthIndex(8)
+      return
+    }
+
+    setMonthIndex(0)
+  }
+
+  const handleMonthSelect = (nextMonthIndex: number) => {
+    setMonthIndex(nextMonthIndex)
+    setWeekIndex(0)
+  }
+
+  const goHome = () => {
+    setYear(2026)
+    setMonthIndex(8)
+    setWeekIndex(0)
+  }
+
+  const goToday = () => {
+    const todayDate = new Date()
+    const currentYear = todayDate.getFullYear()
+    const currentMonth = todayDate.getMonth()
+    const dateKey = formatDateKey(todayDate)
+    const info = getDateInfoFromKey(dateKey)
+
+    if (currentYear < 2026 || currentYear > 2030) {
+      goHome()
+      return
+    }
+
+    setYear(currentYear)
+    setMonthIndex(currentMonth)
+    setWeekIndex(info.weekIndex)
+  }
+
+  const goBack = () => {
+    const currentIndex = monthOptions.indexOf(monthIndex)
+
+    if (weekIndex > 0) {
+      setWeekIndex(weekIndex - 1)
+      return
+    }
+
+    if (currentIndex > 0) {
+      setMonthIndex(monthOptions[currentIndex - 1])
+      setWeekIndex(4)
+      return
+    }
+
+    const currentYearIndex = YEAR_OPTIONS.indexOf(year)
+    if (currentYearIndex > 0) {
+      const previousYear = YEAR_OPTIONS[currentYearIndex - 1]
+      handleYearSelect(previousYear)
+    }
+  }
+
+  const openAddTaskModal = (dateKey: string) => {
+    setSelectedDateKey(dateKey)
+    setNewTaskTitle('')
+    setNewTaskType('temporary')
+    setAddTaskError('')
+    setIsTaskModalOpen(true)
+  }
+
+  const closeAddTaskModal = () => {
+    setIsTaskModalOpen(false)
+    setSelectedDateKey('')
+    setNewTaskTitle('')
+    setNewTaskType('temporary')
+    setAddTaskError('')
+  }
+
+  const handleAddTask = () => {
+    const trimmedTitle = newTaskTitle.trim()
+    if (!trimmedTitle || !selectedDateKey) {
+      return
+    }
+
+    const info = getDateInfoFromKey(selectedDateKey)
+    const duplicateRecurring =
+      newTaskType === 'permanent' &&
+      tasks.some(
+        (task) =>
+          task.type === 'permanent' &&
+          task.title.toLowerCase() === trimmedTitle.toLowerCase() &&
+          task.recurrenceKey === `${info.weekLabel}|${info.weekday}`,
+      )
+
+    if (duplicateRecurring) {
+      setAddTaskError('A matching recurring task already exists for this week and weekday.')
+      return
+    }
+
+    const task: Task = {
+      id: createId(),
+      title: trimmedTitle,
+      type: newTaskType,
+      dateKey: newTaskType === 'temporary' ? selectedDateKey : undefined,
+      recurrenceKey:
+        newTaskType === 'permanent' ? `${info.weekLabel}|${info.weekday}` : undefined,
+      exceptions: {},
+      completionByDate: {},
+    }
+
+    setTasks((previousTasks) => [...previousTasks, task])
+    closeAddTaskModal()
+  }
+
+  const toggleTaskCompletion = (taskId: string, dateKey: string) => {
+    setTasks((previousTasks) =>
+      previousTasks.map((task) => {
+        if (task.id !== taskId) {
+          return task
+        }
+
+        const nextCompleted = !isTaskCompleted(task, dateKey)
+
+        return {
+          ...task,
+          completionByDate: {
+            ...task.completionByDate,
+            [dateKey]: nextCompleted,
+          },
+        }
+      }),
+    )
+  }
+
+  const handleDeleteTask = (mode: 'temporary' | 'permanent') => {
+    if (!deleteTarget) {
+      return
+    }
+
+    const { task, dateKey } = deleteTarget
+
+    setTasks((previousTasks) => {
+      if (task.type === 'temporary' || mode === 'permanent') {
+        return previousTasks.filter((item) => item.id !== task.id)
+      }
+
+      return previousTasks.map((item) => {
+        if (item.id !== task.id) {
+          return item
+        }
+
+        return {
+          ...item,
+          exceptions: {
+            ...item.exceptions,
+            [dateKey]: true,
+          },
+        }
+      })
+    })
+
+    setDeleteTarget(null)
+  }
+
+  const openEditModal = (task: Task, dateKey: string) => {
+    setEditedTaskTitle(task.title)
+    setEditMode(task.type === 'permanent' ? 'all' : 'occurrence')
+    setEditTarget({ task, dateKey })
+  }
+
+  const handleSaveEdit = () => {
+    if (!editTarget) {
+      return
+    }
+
+    const { task, dateKey } = editTarget
+    const trimmedTitle = editedTaskTitle.trim()
+
+    if (!trimmedTitle) {
+      return
+    }
+
+    setTasks((previousTasks) => {
+      if (task.type === 'temporary') {
+        return previousTasks.map((item) => {
+          if (item.id !== task.id) {
+            return item
+          }
+
+          return {
+            ...item,
+            title: trimmedTitle,
+          }
+        })
+      }
+
+      if (editMode === 'all') {
+        return previousTasks.map((item) => {
+          if (item.id !== task.id) {
+            return item
+          }
+
+          return {
+            ...item,
+            title: trimmedTitle,
+          }
+        })
+      }
+
+      return [
+        ...previousTasks,
+        {
+          ...task,
+          id: createId(),
+          title: trimmedTitle,
+          type: 'temporary',
+          dateKey,
+          recurrenceKey: undefined,
+          completionByDate: {
+            ...task.completionByDate,
+            [dateKey]: Boolean(task.completionByDate[dateKey]),
+          },
+        },
+      ]
+    })
+
+    setEditTarget(null)
+    setEditedTaskTitle('')
+  }
+
+  return (
+    <div className="planner-app">
+      <aside className="side-panel">
+        <div className="nav-section">
+          <h2>Years</h2>
+          <div className="year-grid">
+            {YEAR_OPTIONS.map((yearOption) => (
+              <button
+                key={yearOption}
+                type="button"
+                className={yearOption === year ? 'nav-button active' : 'nav-button'}
+                onClick={() => handleYearSelect(yearOption)}
+              >
+                {yearOption}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <div className="nav-section">
+          <h2>Months</h2>
+          <div className="month-grid">
+            {monthOptions.map((month) => (
+              <button
+                key={month}
+                type="button"
+                className={month === monthIndex ? 'nav-button active' : 'nav-button'}
+                onClick={() => handleMonthSelect(month)}
+              >
+                {MONTH_NAMES[month]}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <div className="nav-section">
+          <h2>Weeks</h2>
+          <div className="week-grid">
+            {WEEK_POSITIONS.map((label, index) => (
+              <button
+                key={label}
+                type="button"
+                className={index === weekIndex ? 'nav-button active' : 'nav-button'}
+                onClick={() => setWeekIndex(index)}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+        </div>
+      </aside>
+
+      <main className="calendar-panel">
+        <header className="calendar-header">
+          <div className="header-main">
+            <div>
+              <span className="eyebrow">My Task Planner</span>
+              <h1>{MONTH_NAMES[monthIndex]} {year}</h1>
+            </div>
+            <div className="header-actions">
+              <button type="button" className="secondary-button small" onClick={goToday}>
+                Today
+              </button>
+              <button type="button" className="secondary-button small" onClick={goBack}>
+                Back
+              </button>
+              <button type="button" className="secondary-button small" onClick={goHome}>
+                Home
+              </button>
+            </div>
+          </div>
+          <nav className="breadcrumbs" aria-label="Breadcrumb navigation">
+            <button type="button" className="breadcrumb-link" onClick={goHome}>
+              Years
+            </button>
+            <span>›</span>
+            <button type="button" className="breadcrumb-link" onClick={() => setYear(year)}>
+              {year}
+            </button>
+            <span>›</span>
+            <button type="button" className="breadcrumb-link" onClick={() => handleMonthSelect(monthIndex)}>
+              {MONTH_NAMES[monthIndex]}
+            </button>
+            <span>›</span>
+            <span>{WEEK_POSITIONS[weekIndex]}</span>
+          </nav>
+        </header>
+
+        <div className="day-grid">
+          {weekDates.map((day) => {
+            const visibleTasks = getVisibleTasksForDate(day.dateKey, tasks)
+            const isToday = day.dateKey === todayKey
+
+            return (
+              <section
+                key={day.dateKey}
+                className={day.isCurrentMonth ? `day-card${isToday ? ' today' : ''}` : 'day-card muted'}
+              >
+                <div className="day-header">
+                  <div>
+                    <p className="day-name">{day.label}</p>
+                    <h3>{day.day}</h3>
+                    {isToday ? <span className="today-badge">Today</span> : null}
+                  </div>
+                  <button type="button" className="add-task-button" onClick={() => openAddTaskModal(day.dateKey)}>
+                    Add Task
+                  </button>
+                </div>
+
+                <ul className="task-list">
+                  {visibleTasks.length === 0 ? <li className="empty-state">No tasks for this day</li> : null}
+                  {visibleTasks.map((task) => {
+                    const completed = isTaskCompleted(task, day.dateKey)
+                    const indicator = task.type === 'permanent' ? '🔁' : '•'
+                    const indicatorTitle = task.type === 'permanent' ? 'Permanent recurring task' : 'Temporary task'
+
+                    return (
+                      <li key={`${task.id}-${day.dateKey}`} className={completed ? 'task-item completed' : 'task-item'}>
+                        <label className="task-main" title={indicatorTitle}>
+                          <span className="task-indicator" title={indicatorTitle}>{indicator}</span>
+                          <input
+                            type="checkbox"
+                            checked={completed}
+                            onChange={() => toggleTaskCompletion(task.id, day.dateKey)}
+                          />
+                          <span>{task.title}</span>
+                        </label>
+                        <div className="task-actions">
+                          <button
+                            type="button"
+                            className="edit-button"
+                            onClick={() => openEditModal(task, day.dateKey)}
+                            aria-label={`Edit ${task.title}`}
+                          >
+                            ✎
+                          </button>
+                          <button
+                            type="button"
+                            className="delete-button"
+                            onClick={() => setDeleteTarget({ task, dateKey: day.dateKey })}
+                            aria-label={`Delete ${task.title}`}
+                          >
+                            🗑
+                          </button>
+                        </div>
+                      </li>
+                    )
+                  })}
+                </ul>
+              </section>
+            )
+          })}
+        </div>
+      </main>
+
+      {isTaskModalOpen ? (
+        <div className="modal-backdrop" onClick={closeAddTaskModal}>
+          <div className="modal-card" onClick={(event) => event.stopPropagation()}>
+            <h2>Add Task</h2>
+            <label className="field-label">
+              Task Name
+              <input
+                type="text"
+                value={newTaskTitle}
+                onChange={(event) => setNewTaskTitle(event.target.value)}
+                placeholder="Review Quality Dashboard"
+              />
+            </label>
+
+            <div className="field-group">
+              <span>Add Type</span>
+              <div className="toggle-row">
+                <label className={newTaskType === 'temporary' ? 'toggle-option active' : 'toggle-option'}>
+                  <input
+                    type="radio"
+                    name="taskType"
+                    value="temporary"
+                    checked={newTaskType === 'temporary'}
+                    onChange={() => setNewTaskType('temporary')}
+                  />
+                  Temporary
+                </label>
+                <label className={newTaskType === 'permanent' ? 'toggle-option active' : 'toggle-option'}>
+                  <input
+                    type="radio"
+                    name="taskType"
+                    value="permanent"
+                    checked={newTaskType === 'permanent'}
+                    onChange={() => setNewTaskType('permanent')}
+                  />
+                  Permanent
+                </label>
+              </div>
+            </div>
+
+            {addTaskError ? <p className="error-message">{addTaskError}</p> : null}
+
+            <div className="modal-actions">
+              <button type="button" className="secondary-button" onClick={closeAddTaskModal}>
+                Cancel
+              </button>
+              <button type="button" className="primary-button" onClick={handleAddTask}>
+                Save Task
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {deleteTarget ? (
+        <div className="modal-backdrop" onClick={() => setDeleteTarget(null)}>
+          <div className="modal-card delete-modal" onClick={(event) => event.stopPropagation()}>
+            <h2>Delete Task</h2>
+            <p>
+              Are you sure you want to remove <strong>{deleteTarget.task.title}</strong>?
+            </p>
+
+            {deleteTarget.task.type === 'permanent' ? (
+              <div className="modal-actions stacked">
+                <button type="button" className="secondary-button" onClick={() => handleDeleteTask('temporary')}>
+                  Delete Temporarily
+                </button>
+                <button type="button" className="danger-button" onClick={() => handleDeleteTask('permanent')}>
+                  Delete Permanently
+                </button>
+              </div>
+            ) : (
+              <div className="modal-actions">
+                <button type="button" className="secondary-button" onClick={() => setDeleteTarget(null)}>
+                  Cancel
+                </button>
+                <button type="button" className="danger-button" onClick={() => handleDeleteTask('temporary')}>
+                  Delete
+                </button>
+              </div>
+            )}
+          </div>
+        </div>
+      ) : null}
+
+      {editTarget ? (
+        <div className="modal-backdrop" onClick={() => setEditTarget(null)}>
+          <div className="modal-card" onClick={(event) => event.stopPropagation()}>
+            <h2>Edit Task</h2>
+            <label className="field-label">
+              Task Name
+              <input
+                type="text"
+                value={editedTaskTitle}
+                onChange={(event) => setEditedTaskTitle(event.target.value)}
+              />
+            </label>
+
+            {editTarget.task.type === 'permanent' ? (
+              <div className="field-group">
+                <span>Edit this task</span>
+                <div className="toggle-row">
+                  <label className={editMode === 'occurrence' ? 'toggle-option active' : 'toggle-option'}>
+                    <input
+                      type="radio"
+                      name="editMode"
+                      value="occurrence"
+                      checked={editMode === 'occurrence'}
+                      onChange={() => setEditMode('occurrence')}
+                    />
+                    This Day Only
+                  </label>
+                  <label className={editMode === 'all' ? 'toggle-option active' : 'toggle-option'}>
+                    <input
+                      type="radio"
+                      name="editMode"
+                      value="all"
+                      checked={editMode === 'all'}
+                      onChange={() => setEditMode('all')}
+                    />
+                    All Occurrences
+                  </label>
+                </div>
+              </div>
+            ) : null}
+
+            <div className="modal-actions">
+              <button type="button" className="secondary-button" onClick={() => setEditTarget(null)}>
+                Cancel
+              </button>
+              <button type="button" className="primary-button" onClick={handleSaveEdit}>
+                Save Changes
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+    </div>
+  )
+}
+
+export default App
