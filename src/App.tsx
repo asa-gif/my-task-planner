@@ -352,6 +352,57 @@ async function syncTasksToSupabase(tasks: Task[]) {
   }
 }
 
+async function deleteTaskFromSupabase(task: Task, dateKey: string, mode: 'temporary' | 'permanent') {
+  if (task.type === 'permanent' && mode === 'temporary') {
+    const { error } = await supabase.from('task_exceptions').upsert(
+      {
+        task_id: task.id,
+        exception_date: dateKey,
+        action: 'hidden',
+      },
+      { onConflict: 'task_id,exception_date' },
+    )
+
+    if (error) {
+      throw error
+    }
+
+    return
+  }
+
+  const { error: deleteExceptionsError } = await supabase
+    .from('task_exceptions')
+    .delete()
+    .eq('task_id', task.id)
+
+  if (deleteExceptionsError) {
+    throw deleteExceptionsError
+  }
+
+  const { error: deleteCompletionsError } = await supabase
+    .from('task_completions')
+    .delete()
+    .eq('task_id', task.id)
+
+  if (deleteCompletionsError) {
+    throw deleteCompletionsError
+  }
+
+  const { data: deletedTasks, error: deleteTaskError } = await supabase
+    .from('tasks')
+    .delete()
+    .eq('id', task.id)
+    .select('id')
+
+  if (deleteTaskError) {
+    throw deleteTaskError
+  }
+
+  if (!deletedTasks || deletedTasks.length !== 1) {
+    throw new Error('The task was not deleted. Check the Supabase DELETE policy for tasks.')
+  }
+}
+
 function getAvailableMonthsForYear(year: number) {
   return year === 2026 ? [8, 9, 10, 11] : [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
 }
@@ -427,6 +478,8 @@ function App() {
   const [editedTaskTitle, setEditedTaskTitle] = useState('')
   const [editMode, setEditMode] = useState<'occurrence' | 'all'>('all')
   const [addTaskError, setAddTaskError] = useState('')
+  const [deleteError, setDeleteError] = useState('')
+  const [isDeleting, setIsDeleting] = useState(false)
   const hasLoadedTasksRef = useRef(false)
   const syncQueueRef = useRef<Promise<void>>(Promise.resolve())
 
@@ -609,34 +662,39 @@ function App() {
     )
   }
 
-  const handleDeleteTask = (mode: 'temporary' | 'permanent') => {
+  const handleDeleteTask = async (mode: 'temporary' | 'permanent') => {
     if (!deleteTarget) {
       return
     }
 
     const { task, dateKey } = deleteTarget
+    setDeleteError('')
+    setIsDeleting(true)
 
-    setTasks((previousTasks) => {
-      if (task.type === 'temporary' || mode === 'permanent') {
-        return previousTasks.filter((item) => item.id !== task.id)
-      }
+    try {
+      syncQueueRef.current = syncQueueRef.current
+        .catch(() => undefined)
+        .then(() => deleteTaskFromSupabase(task, dateKey, mode))
+      await syncQueueRef.current
 
-      return previousTasks.map((item) => {
-        if (item.id !== task.id) {
-          return item
+      setTasks((previousTasks) => {
+        if (task.type === 'temporary' || mode === 'permanent') {
+          return previousTasks.filter((item) => item.id !== task.id)
         }
 
-        return {
-          ...item,
-          exceptions: {
-            ...item.exceptions,
-            [dateKey]: true,
-          },
-        }
+        return previousTasks.map((item) =>
+          item.id === task.id
+            ? { ...item, exceptions: { ...item.exceptions, [dateKey]: true } }
+            : item,
+        )
       })
-    })
 
-    setDeleteTarget(null)
+      setDeleteTarget(null)
+    } catch (error) {
+      setDeleteError(error instanceof Error ? error.message : 'Could not delete the task.')
+    } finally {
+      setIsDeleting(false)
+    }
   }
 
   const openEditModal = (task: Task, dateKey: string) => {
@@ -921,13 +979,14 @@ function App() {
             <p>
               Are you sure you want to remove <strong>{deleteTarget.task.title}</strong>?
             </p>
+            {deleteError ? <p className="error-message">{deleteError}</p> : null}
 
             {deleteTarget.task.type === 'permanent' ? (
               <div className="modal-actions stacked">
-                <button type="button" className="secondary-button" onClick={() => handleDeleteTask('temporary')}>
+                <button type="button" className="secondary-button" disabled={isDeleting} onClick={() => handleDeleteTask('temporary')}>
                   Delete Temporarily
                 </button>
-                <button type="button" className="danger-button" onClick={() => handleDeleteTask('permanent')}>
+                <button type="button" className="danger-button" disabled={isDeleting} onClick={() => handleDeleteTask('permanent')}>
                   Delete Permanently
                 </button>
               </div>
@@ -936,7 +995,7 @@ function App() {
                 <button type="button" className="secondary-button" onClick={() => setDeleteTarget(null)}>
                   Cancel
                 </button>
-                <button type="button" className="danger-button" onClick={() => handleDeleteTask('temporary')}>
+                <button type="button" className="danger-button" disabled={isDeleting} onClick={() => handleDeleteTask('temporary')}>
                   Delete
                 </button>
               </div>
