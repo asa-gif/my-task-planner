@@ -129,10 +129,6 @@ type DbTaskRow = {
   recurrence_day: string | null
 }
 
-type DbTaskIdRow = {
-  id: string
-}
-
 type DbExceptionRow = {
   task_id: string
   exception_date: string
@@ -229,8 +225,7 @@ async function loadTasksFromSupabase(): Promise<Task[]> {
     task.completionByDate[row.occurrence_date] = true
   })
 
-  const tasks = Array.from(taskMap.values())
-  return tasks.length > 0 ? tasks : readTasksFromLocalStorage()
+  return Array.from(taskMap.values())
 }
 
 async function syncTasksToSupabase(tasks: Task[]) {
@@ -243,7 +238,7 @@ async function syncTasksToSupabase(tasks: Task[]) {
   }
 
   const taskIds = new Set(tasks.map((task) => task.id))
-  const deletedTaskIds = (existingTaskRows as DbTaskIdRow[] | null ?? [])
+  const deletedTaskIds = (existingTaskRows ?? [])
     .map((row) => row.id)
     .filter((taskId) => !taskIds.has(taskId))
 
@@ -432,6 +427,7 @@ function App() {
   const [editedTaskTitle, setEditedTaskTitle] = useState('')
   const [editMode, setEditMode] = useState<'occurrence' | 'all'>('all')
   const [addTaskError, setAddTaskError] = useState('')
+  const hasLoadedTasksRef = useRef(false)
   const syncQueueRef = useRef<Promise<void>>(Promise.resolve())
 
   const todayKey = useMemo(() => formatDateKey(new Date()), [])
@@ -444,11 +440,13 @@ function App() {
         const nextTasks = await loadTasksFromSupabase()
         if (isMounted) {
           setTasks(nextTasks)
+          hasLoadedTasksRef.current = true
         }
       } catch {
         const fallbackTasks = readTasksFromLocalStorage()
         if (isMounted) {
           setTasks(fallbackTasks)
+          hasLoadedTasksRef.current = true
         }
       }
     }
@@ -461,6 +459,10 @@ function App() {
   }, [])
 
   useEffect(() => {
+    if (!hasLoadedTasksRef.current) {
+      return
+    }
+
     syncQueueRef.current = syncQueueRef.current
       .catch(() => undefined)
       .then(() => syncTasksToSupabase(tasks))
