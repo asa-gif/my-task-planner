@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { supabase } from './lib/supabase'
 import './App.css'
 
@@ -129,6 +129,10 @@ type DbTaskRow = {
   recurrence_day: string | null
 }
 
+type DbTaskIdRow = {
+  id: string
+}
+
 type DbExceptionRow = {
   task_id: string
   exception_date: string
@@ -230,6 +234,48 @@ async function loadTasksFromSupabase(): Promise<Task[]> {
 }
 
 async function syncTasksToSupabase(tasks: Task[]) {
+  const { data: existingTaskRows, error: existingTasksError } = await supabase
+    .from('tasks')
+    .select('id')
+
+  if (existingTasksError) {
+    throw existingTasksError
+  }
+
+  const taskIds = new Set(tasks.map((task) => task.id))
+  const deletedTaskIds = (existingTaskRows as DbTaskIdRow[] | null ?? [])
+    .map((row) => row.id)
+    .filter((taskId) => !taskIds.has(taskId))
+
+  if (deletedTaskIds.length > 0) {
+    const { error: deleteExceptionsError } = await supabase
+      .from('task_exceptions')
+      .delete()
+      .in('task_id', deletedTaskIds)
+
+    if (deleteExceptionsError) {
+      throw deleteExceptionsError
+    }
+
+    const { error: deleteCompletionsError } = await supabase
+      .from('task_completions')
+      .delete()
+      .in('task_id', deletedTaskIds)
+
+    if (deleteCompletionsError) {
+      throw deleteCompletionsError
+    }
+
+    const { error: deleteTasksError } = await supabase
+      .from('tasks')
+      .delete()
+      .in('id', deletedTaskIds)
+
+    if (deleteTasksError) {
+      throw deleteTasksError
+    }
+  }
+
   const taskRows = tasks.map((task) => ({
     id: task.id,
     title: task.title,
@@ -266,12 +312,11 @@ async function syncTasksToSupabase(tasks: Task[]) {
       })),
   )
 
-  const taskIds = tasks.map((task) => task.id)
-  if (taskIds.length > 0) {
+  if (taskIds.size > 0) {
     const { error: deleteExceptionsError } = await supabase
       .from('task_exceptions')
       .delete()
-      .in('task_id', taskIds)
+      .in('task_id', Array.from(taskIds))
 
     if (deleteExceptionsError) {
       throw deleteExceptionsError
@@ -280,7 +325,7 @@ async function syncTasksToSupabase(tasks: Task[]) {
     const { error: deleteCompletionsError } = await supabase
       .from('task_completions')
       .delete()
-      .in('task_id', taskIds)
+      .in('task_id', Array.from(taskIds))
 
     if (deleteCompletionsError) {
       throw deleteCompletionsError
@@ -387,6 +432,7 @@ function App() {
   const [editedTaskTitle, setEditedTaskTitle] = useState('')
   const [editMode, setEditMode] = useState<'occurrence' | 'all'>('all')
   const [addTaskError, setAddTaskError] = useState('')
+  const syncQueueRef = useRef<Promise<void>>(Promise.resolve())
 
   const todayKey = useMemo(() => formatDateKey(new Date()), [])
 
@@ -415,18 +461,14 @@ function App() {
   }, [])
 
   useEffect(() => {
-    if (tasks.length === 0) {
-      if (typeof window !== 'undefined') {
-        window.localStorage.setItem(STORAGE_KEY, JSON.stringify({ version: STORAGE_VERSION, tasks: [] }))
-      }
-      return
-    }
-
-    syncTasksToSupabase(tasks).catch(() => {
-      if (typeof window !== 'undefined') {
-        window.localStorage.setItem(STORAGE_KEY, JSON.stringify({ version: STORAGE_VERSION, tasks }))
-      }
-    })
+    syncQueueRef.current = syncQueueRef.current
+      .catch(() => undefined)
+      .then(() => syncTasksToSupabase(tasks))
+      .catch(() => {
+        if (typeof window !== 'undefined') {
+          window.localStorage.setItem(STORAGE_KEY, JSON.stringify({ version: STORAGE_VERSION, tasks }))
+        }
+      })
   }, [tasks])
 
   const monthOptions = useMemo(() => getAvailableMonthsForYear(year), [year])
