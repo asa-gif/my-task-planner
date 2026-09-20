@@ -426,9 +426,11 @@ function getDateInfoFromKey(dateKey: string) {
   }
 }
 
-function getMonthDates(year: number, monthIndex: number): DayCard[] {
-  return Array.from({ length: 35 }, (_, index) => {
-    const virtualDay = index + 1
+function getWeekDates(year: number, monthIndex: number, weekIndex: number): DayCard[] {
+  const startDay = weekIndex * 7 + 1
+
+  return Array.from({ length: 7 }, (_, index) => {
+    const virtualDay = startDay + index
     const currentDate = new Date(year, monthIndex, virtualDay)
 
     return {
@@ -468,6 +470,7 @@ function getVisibleTasksForDate(dateKey: string, tasks: Task[]) {
 function App() {
   const [year, setYear] = useState(2026)
   const [monthIndex, setMonthIndex] = useState(8)
+  const [weekIndex, setWeekIndex] = useState(0)
   const [tasks, setTasks] = useState<Task[]>([])
   const [isTaskModalOpen, setIsTaskModalOpen] = useState(false)
   const [selectedDateKey, setSelectedDateKey] = useState('')
@@ -527,10 +530,11 @@ function App() {
   }, [tasks])
 
   const monthOptions = useMemo(() => getAvailableMonthsForYear(year), [year])
-  const monthDates = useMemo(() => getMonthDates(year, monthIndex), [year, monthIndex])
+  const weekDates = useMemo(() => getWeekDates(year, monthIndex, weekIndex), [year, monthIndex, weekIndex])
 
   const handleYearSelect = (nextYear: number) => {
     setYear(nextYear)
+    setWeekIndex(0)
 
     if (nextYear === 2026) {
       setMonthIndex(8)
@@ -542,17 +546,20 @@ function App() {
 
   const handleMonthSelect = (nextMonthIndex: number) => {
     setMonthIndex(nextMonthIndex)
+    setWeekIndex(0)
   }
 
   const goHome = () => {
     setYear(2026)
     setMonthIndex(8)
+    setWeekIndex(0)
   }
 
   const goToday = () => {
     const todayDate = new Date()
     const currentYear = todayDate.getFullYear()
     const currentMonth = todayDate.getMonth()
+    const todayInfo = getDateInfoFromKey(formatDateKey(todayDate))
 
     if (currentYear < 2026 || currentYear > 2030) {
       goHome()
@@ -561,13 +568,20 @@ function App() {
 
     setYear(currentYear)
     setMonthIndex(currentMonth)
+    setWeekIndex(todayInfo.weekIndex)
   }
 
   const goBack = () => {
     const currentIndex = monthOptions.indexOf(monthIndex)
 
+    if (weekIndex > 0) {
+      setWeekIndex(weekIndex - 1)
+      return
+    }
+
     if (currentIndex > 0) {
       setMonthIndex(monthOptions[currentIndex - 1])
+      setWeekIndex(4)
       return
     }
 
@@ -819,11 +833,26 @@ function App() {
             <button type="button" className="breadcrumb-link" onClick={() => handleMonthSelect(monthIndex)}>
               {MONTH_NAMES[monthIndex]}
             </button>
+            <span>›</span>
+            <span>{WEEK_POSITIONS[weekIndex]}</span>
           </nav>
         </header>
 
+        <div className="month-week-selector" aria-label="Week selection">
+          {WEEK_POSITIONS.map((label, index) => (
+            <button
+              key={label}
+              type="button"
+              className={index === weekIndex ? 'nav-button active' : 'nav-button'}
+              onClick={() => setWeekIndex(index)}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+
         <div className="day-grid">
-          {monthDates.map((day) => {
+          {weekDates.map((day) => {
             const visibleTasks = getVisibleTasksForDate(day.dateKey, tasks)
             const isToday = day.dateKey === todayKey
 
