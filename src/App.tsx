@@ -18,8 +18,9 @@ const MONTH_NAMES = [
   'December',
 ]
 const WEEK_POSITIONS = ['First Week', 'Second Week', 'Third Week', 'Fourth Week', 'Fifth Week']
-const WEEKDAY_NAMES = ['Saturday', 'Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday']
+const WEEKDAY_NAMES = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday']
 const STORAGE_KEY = 'my-task-planner-data'
+const WEEK_COUNT_STORAGE_KEY = 'my-task-planner-week-counts'
 const STORAGE_VERSION = 1
 
 type TaskType = 'temporary' | 'permanent'
@@ -37,10 +38,8 @@ type Task = {
 type DayCard = {
   dateKey: string
   label: string
-  day: number
-  monthIndex: number
-  year: number
-  isCurrentMonth: boolean
+  weekIndex: number
+  weekday: string
 }
 
 function createId() {
@@ -53,22 +52,6 @@ function createId() {
     const value = character === 'x' ? random : (random & 0x3 | 0x8)
     return value.toString(16)
   })
-}
-
-function formatDateKey(date: Date) {
-  const year = date.getFullYear()
-  const month = String(date.getMonth() + 1).padStart(2, '0')
-  const day = String(date.getDate()).padStart(2, '0')
-  return `${year}-${month}-${day}`
-}
-
-function parseDateKey(dateKey: string) {
-  const [year, month, day] = dateKey.split('-').map(Number)
-  return new Date(year, month - 1, day)
-}
-
-function getWeekdayName(date: Date) {
-  return WEEKDAY_NAMES[(date.getDay() + 1) % 7]
 }
 
 function buildSampleTasks(): Task[] {
@@ -178,6 +161,30 @@ function readTasksFromLocalStorage(): Task[] {
     return sampleTasks
   } catch {
     return buildSampleTasks()
+  }
+}
+
+function readWeekCountsFromLocalStorage(): Record<string, 4 | 5> {
+  if (typeof window === 'undefined') {
+    return {}
+  }
+
+  try {
+    const saved = window.localStorage.getItem(WEEK_COUNT_STORAGE_KEY)
+    if (!saved) {
+      return {}
+    }
+
+    const parsed = JSON.parse(saved)
+    if (!parsed || typeof parsed !== 'object') {
+      return {}
+    }
+
+    return Object.fromEntries(
+      Object.entries(parsed).filter(([, value]) => value === 4 || value === 5),
+    ) as Record<string, 4 | 5>
+  } catch {
+    return {}
   }
 }
 
@@ -411,35 +418,21 @@ function getAvailableMonthsForYear(year: number) {
   return year === 2026 ? [8, 9, 10, 11] : [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
 }
 
-function getDateInfoFromKey(dateKey: string) {
-  const date = parseDateKey(dateKey)
-  const dayNumber = date.getDate()
-  const weekIndex = Math.min(4, Math.floor((dayNumber - 1) / 7))
+function getWorkSlotKey(year: number, monthIndex: number, weekIndex: number, dayIndex: number) {
+  return `work:${year}-${String(monthIndex + 1).padStart(2, '0')}:w${weekIndex + 1}:d${dayIndex + 1}`
+}
 
-  return {
-    year: date.getFullYear(),
-    monthIndex: date.getMonth(),
-    day: date.getDate(),
-    weekday: getWeekdayName(date),
-    weekLabel: WEEK_POSITIONS[weekIndex],
-    weekIndex,
-  }
+function getMonthKey(year: number, monthIndex: number) {
+  return `${year}-${String(monthIndex + 1).padStart(2, '0')}`
 }
 
 function getWeekDates(year: number, monthIndex: number, weekIndex: number): DayCard[] {
-  const startDay = weekIndex * 7 + 1
-
   return Array.from({ length: 7 }, (_, index) => {
-    const virtualDay = startDay + index
-    const currentDate = new Date(year, monthIndex, virtualDay)
-
     return {
-      dateKey: formatDateKey(currentDate),
-      label: getWeekdayName(currentDate),
-      day: virtualDay,
-      monthIndex: currentDate.getMonth(),
-      year: currentDate.getFullYear(),
-      isCurrentMonth: currentDate.getMonth() === monthIndex,
+      dateKey: getWorkSlotKey(year, monthIndex, weekIndex, index),
+      label: WEEKDAY_NAMES[index],
+      weekIndex,
+      weekday: WEEKDAY_NAMES[index],
     }
   })
 }
@@ -448,20 +441,18 @@ function isTaskCompleted(task: Task, dateKey: string) {
   return Boolean(task.completionByDate[dateKey])
 }
 
-function getVisibleTasksForDate(dateKey: string, tasks: Task[]) {
-  const info = getDateInfoFromKey(dateKey)
-
+function getVisibleTasksForSlot(day: DayCard, tasks: Task[]) {
   return tasks.filter((task) => {
     if (task.type === 'temporary') {
-      return task.dateKey === dateKey
+      return task.dateKey === day.dateKey
     }
 
     if (!task.recurrenceKey) {
       return false
     }
 
-    const isMatchingRecurrence = task.recurrenceKey === `${info.weekLabel}|${info.weekday}`
-    const isTemporarilyRemoved = Boolean(task.exceptions[dateKey])
+    const isMatchingRecurrence = task.recurrenceKey === `${WEEK_POSITIONS[day.weekIndex]}|${day.weekday}`
+    const isTemporarilyRemoved = Boolean(task.exceptions[day.dateKey])
 
     return isMatchingRecurrence && !isTemporarilyRemoved
   })
@@ -471,6 +462,7 @@ function App() {
   const [year, setYear] = useState(2026)
   const [monthIndex, setMonthIndex] = useState(8)
   const [weekIndex, setWeekIndex] = useState(0)
+  const [weekCounts, setWeekCounts] = useState<Record<string, 4 | 5>>(() => readWeekCountsFromLocalStorage())
   const [tasks, setTasks] = useState<Task[]>([])
   const [isTaskModalOpen, setIsTaskModalOpen] = useState(false)
   const [selectedDateKey, setSelectedDateKey] = useState('')
@@ -485,8 +477,6 @@ function App() {
   const [isDeleting, setIsDeleting] = useState(false)
   const hasLoadedTasksRef = useRef(false)
   const syncQueueRef = useRef<Promise<void>>(Promise.resolve())
-
-  const todayKey = useMemo(() => formatDateKey(new Date()), [])
 
   useEffect(() => {
     let isMounted = true
@@ -530,7 +520,21 @@ function App() {
   }, [tasks])
 
   const monthOptions = useMemo(() => getAvailableMonthsForYear(year), [year])
-  const weekDates = useMemo(() => getWeekDates(year, monthIndex, weekIndex), [year, monthIndex, weekIndex])
+  const monthKey = getMonthKey(year, monthIndex)
+  const weekCount = weekCounts[monthKey] ?? 5
+  const visibleWeekIndex = Math.min(weekIndex, weekCount - 1)
+  const weekDates = useMemo(() => getWeekDates(year, monthIndex, visibleWeekIndex), [year, monthIndex, visibleWeekIndex])
+
+  const handleWeekCountChange = (count: 4 | 5) => {
+    setWeekCounts((previous) => {
+      const next = { ...previous, [monthKey]: count }
+      if (typeof window !== 'undefined') {
+        window.localStorage.setItem(WEEK_COUNT_STORAGE_KEY, JSON.stringify(next))
+      }
+      return next
+    })
+    setWeekIndex((previous) => Math.min(previous, count - 1))
+  }
 
   const handleYearSelect = (nextYear: number) => {
     setYear(nextYear)
@@ -559,7 +563,6 @@ function App() {
     const todayDate = new Date()
     const currentYear = todayDate.getFullYear()
     const currentMonth = todayDate.getMonth()
-    const todayInfo = getDateInfoFromKey(formatDateKey(todayDate))
 
     if (currentYear < 2026 || currentYear > 2030) {
       goHome()
@@ -568,7 +571,7 @@ function App() {
 
     setYear(currentYear)
     setMonthIndex(currentMonth)
-    setWeekIndex(todayInfo.weekIndex)
+    setWeekIndex(0)
   }
 
   const goBack = () => {
@@ -581,7 +584,7 @@ function App() {
 
     if (currentIndex > 0) {
       setMonthIndex(monthOptions[currentIndex - 1])
-      setWeekIndex(4)
+      setWeekIndex((weekCounts[`${year}-${String(monthOptions[currentIndex - 1] + 1).padStart(2, '0')}`] ?? 5) - 1)
       return
     }
 
@@ -614,14 +617,19 @@ function App() {
       return
     }
 
-    const info = getDateInfoFromKey(selectedDateKey)
+    const selectedDay = weekDates.find((day) => day.dateKey === selectedDateKey)
+    if (!selectedDay) {
+      return
+    }
+
+    const recurrenceKey = `${WEEK_POSITIONS[selectedDay.weekIndex]}|${selectedDay.weekday}`
     const duplicateRecurring =
       newTaskType === 'permanent' &&
       tasks.some(
         (task) =>
           task.type === 'permanent' &&
           task.title.toLowerCase() === trimmedTitle.toLowerCase() &&
-          task.recurrenceKey === `${info.weekLabel}|${info.weekday}`,
+          task.recurrenceKey === recurrenceKey,
       )
 
     if (duplicateRecurring) {
@@ -635,7 +643,7 @@ function App() {
       type: newTaskType,
       dateKey: newTaskType === 'temporary' ? selectedDateKey : undefined,
       recurrenceKey:
-        newTaskType === 'permanent' ? `${info.weekLabel}|${info.weekday}` : undefined,
+        newTaskType === 'permanent' ? recurrenceKey : undefined,
       exceptions: {},
       completionByDate: {},
     }
@@ -834,16 +842,16 @@ function App() {
               {MONTH_NAMES[monthIndex]}
             </button>
             <span>›</span>
-            <span>{WEEK_POSITIONS[weekIndex]}</span>
+            <span>{WEEK_POSITIONS[visibleWeekIndex]}</span>
           </nav>
         </header>
 
         <div className="month-week-selector" aria-label="Week selection">
-          {WEEK_POSITIONS.map((label, index) => (
+          {WEEK_POSITIONS.slice(0, weekCount).map((label, index) => (
             <button
               key={label}
               type="button"
-              className={index === weekIndex ? 'nav-button active' : 'nav-button'}
+              className={index === visibleWeekIndex ? 'nav-button active' : 'nav-button'}
               onClick={() => setWeekIndex(index)}
             >
               {label}
@@ -851,34 +859,36 @@ function App() {
           ))}
         </div>
 
+        <div className="week-count-selector" aria-label="Number of work weeks in this month">
+          <span>Weeks in this month</span>
+          <button type="button" className={weekCount === 4 ? 'nav-button active' : 'nav-button'} onClick={() => handleWeekCountChange(4)}>
+            4
+          </button>
+          <button type="button" className={weekCount === 5 ? 'nav-button active' : 'nav-button'} onClick={() => handleWeekCountChange(5)}>
+            5
+          </button>
+        </div>
+
         <div className="day-grid">
           {weekDates.map((day) => {
-            const visibleTasks = day.isCurrentMonth ? getVisibleTasksForDate(day.dateKey, tasks) : []
-            const isToday = day.isCurrentMonth && day.dateKey === todayKey
+            const visibleTasks = getVisibleTasksForSlot(day, tasks)
 
             return (
               <section
                 key={day.dateKey}
-                className={day.isCurrentMonth ? `day-card${isToday ? ' today' : ''}` : 'day-card muted'}
+                className="day-card"
               >
                 <div className="day-header">
-                  {day.isCurrentMonth ? (
-                    <>
-                      <div>
-                        <p className="day-name">{day.label}</p>
-                        {isToday ? <span className="today-badge">Today</span> : null}
-                      </div>
-                      <button type="button" className="add-task-button" onClick={() => openAddTaskModal(day.dateKey)}>
-                        Add Task
-                      </button>
-                    </>
-                  ) : null}
+                  <div>
+                    <p className="day-name">{day.label}</p>
+                  </div>
+                  <button type="button" className="add-task-button" onClick={() => openAddTaskModal(day.dateKey)}>
+                    Add Task
+                  </button>
                 </div>
 
                 <ul className="task-list">
-                  {day.isCurrentMonth && visibleTasks.length === 0 ? (
-                    <li className="empty-state">No tasks for this day</li>
-                  ) : null}
+                  {visibleTasks.length === 0 ? <li className="empty-state">No tasks for this day</li> : null}
                   {visibleTasks.map((task) => {
                     const completed = isTaskCompleted(task, day.dateKey)
                     const indicator = task.type === 'permanent' ? '🔁' : '•'
