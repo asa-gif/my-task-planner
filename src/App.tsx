@@ -426,11 +426,9 @@ function getDateInfoFromKey(dateKey: string) {
   }
 }
 
-function getWeekDates(year: number, monthIndex: number, weekIndex: number): DayCard[] {
-  const startDay = weekIndex * 7 + 1
-
-  return Array.from({ length: 7 }, (_, index) => {
-    const virtualDay = startDay + index
+function getMonthDates(year: number, monthIndex: number): DayCard[] {
+  return Array.from({ length: 35 }, (_, index) => {
+    const virtualDay = index + 1
     const currentDate = new Date(year, monthIndex, virtualDay)
 
     return {
@@ -470,7 +468,6 @@ function getVisibleTasksForDate(dateKey: string, tasks: Task[]) {
 function App() {
   const [year, setYear] = useState(2026)
   const [monthIndex, setMonthIndex] = useState(8)
-  const [weekIndex, setWeekIndex] = useState(0)
   const [tasks, setTasks] = useState<Task[]>([])
   const [isTaskModalOpen, setIsTaskModalOpen] = useState(false)
   const [selectedDateKey, setSelectedDateKey] = useState('')
@@ -530,11 +527,10 @@ function App() {
   }, [tasks])
 
   const monthOptions = useMemo(() => getAvailableMonthsForYear(year), [year])
-  const weekDates = useMemo(() => getWeekDates(year, monthIndex, weekIndex), [year, monthIndex, weekIndex])
+  const monthDates = useMemo(() => getMonthDates(year, monthIndex), [year, monthIndex])
 
   const handleYearSelect = (nextYear: number) => {
     setYear(nextYear)
-    setWeekIndex(0)
 
     if (nextYear === 2026) {
       setMonthIndex(8)
@@ -546,21 +542,17 @@ function App() {
 
   const handleMonthSelect = (nextMonthIndex: number) => {
     setMonthIndex(nextMonthIndex)
-    setWeekIndex(0)
   }
 
   const goHome = () => {
     setYear(2026)
     setMonthIndex(8)
-    setWeekIndex(0)
   }
 
   const goToday = () => {
     const todayDate = new Date()
     const currentYear = todayDate.getFullYear()
     const currentMonth = todayDate.getMonth()
-    const dateKey = formatDateKey(todayDate)
-    const info = getDateInfoFromKey(dateKey)
 
     if (currentYear < 2026 || currentYear > 2030) {
       goHome()
@@ -569,20 +561,13 @@ function App() {
 
     setYear(currentYear)
     setMonthIndex(currentMonth)
-    setWeekIndex(info.weekIndex)
   }
 
   const goBack = () => {
     const currentIndex = monthOptions.indexOf(monthIndex)
 
-    if (weekIndex > 0) {
-      setWeekIndex(weekIndex - 1)
-      return
-    }
-
     if (currentIndex > 0) {
       setMonthIndex(monthOptions[currentIndex - 1])
-      setWeekIndex(4)
       return
     }
 
@@ -801,21 +786,6 @@ function App() {
           </div>
         </div>
 
-        <div className="nav-section">
-          <h2>Weeks</h2>
-          <div className="week-grid">
-            {WEEK_POSITIONS.map((label, index) => (
-              <button
-                key={label}
-                type="button"
-                className={index === weekIndex ? 'nav-button active' : 'nav-button'}
-                onClick={() => setWeekIndex(index)}
-              >
-                {label}
-              </button>
-            ))}
-          </div>
-        </div>
       </aside>
 
       <main className="calendar-panel">
@@ -849,13 +819,11 @@ function App() {
             <button type="button" className="breadcrumb-link" onClick={() => handleMonthSelect(monthIndex)}>
               {MONTH_NAMES[monthIndex]}
             </button>
-            <span>›</span>
-            <span>{WEEK_POSITIONS[weekIndex]}</span>
           </nav>
         </header>
 
         <div className="day-grid">
-          {weekDates.map((day) => {
+          {monthDates.map((day) => {
             const visibleTasks = getVisibleTasksForDate(day.dateKey, tasks)
             const isToday = day.dateKey === todayKey
 
@@ -867,7 +835,6 @@ function App() {
                 <div className="day-header">
                   <div>
                     <p className="day-name">{day.label}</p>
-                    <h3>{day.day}</h3>
                     {isToday ? <span className="today-badge">Today</span> : null}
                   </div>
                   <button type="button" className="add-task-button" onClick={() => openAddTaskModal(day.dateKey)}>
