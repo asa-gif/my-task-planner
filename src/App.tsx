@@ -20,7 +20,6 @@ const MONTH_NAMES = [
 const WEEK_POSITIONS = ['First Week', 'Second Week', 'Third Week', 'Fourth Week', 'Fifth Week']
 const WEEKDAY_NAMES = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday']
 const STORAGE_KEY = 'my-task-planner-data'
-const WEEK_COUNT_STORAGE_KEY = 'my-task-planner-week-counts'
 const STORAGE_VERSION = 1
 
 type TaskType = 'temporary' | 'permanent'
@@ -161,30 +160,6 @@ function readTasksFromLocalStorage(): Task[] {
     return sampleTasks
   } catch {
     return buildSampleTasks()
-  }
-}
-
-function readWeekCountsFromLocalStorage(): Record<string, 4 | 5> {
-  if (typeof window === 'undefined') {
-    return {}
-  }
-
-  try {
-    const saved = window.localStorage.getItem(WEEK_COUNT_STORAGE_KEY)
-    if (!saved) {
-      return {}
-    }
-
-    const parsed = JSON.parse(saved)
-    if (!parsed || typeof parsed !== 'object') {
-      return {}
-    }
-
-    return Object.fromEntries(
-      Object.entries(parsed).filter(([, value]) => value === 4 || value === 5),
-    ) as Record<string, 4 | 5>
-  } catch {
-    return {}
   }
 }
 
@@ -422,10 +397,6 @@ function getWorkSlotKey(year: number, monthIndex: number, weekIndex: number, day
   return `work:${year}-${String(monthIndex + 1).padStart(2, '0')}:w${weekIndex + 1}:d${dayIndex + 1}`
 }
 
-function getMonthKey(year: number, monthIndex: number) {
-  return `${year}-${String(monthIndex + 1).padStart(2, '0')}`
-}
-
 function getWeekDates(year: number, monthIndex: number, weekIndex: number): DayCard[] {
   return Array.from({ length: 7 }, (_, index) => {
     return {
@@ -462,7 +433,6 @@ function App() {
   const [year, setYear] = useState(2026)
   const [monthIndex, setMonthIndex] = useState(8)
   const [weekIndex, setWeekIndex] = useState(0)
-  const [weekCounts, setWeekCounts] = useState<Record<string, 4 | 5>>(() => readWeekCountsFromLocalStorage())
   const [tasks, setTasks] = useState<Task[]>([])
   const [isTaskModalOpen, setIsTaskModalOpen] = useState(false)
   const [selectedDateKey, setSelectedDateKey] = useState('')
@@ -520,21 +490,8 @@ function App() {
   }, [tasks])
 
   const monthOptions = useMemo(() => getAvailableMonthsForYear(year), [year])
-  const monthKey = getMonthKey(year, monthIndex)
-  const weekCount = weekCounts[monthKey] ?? 5
-  const visibleWeekIndex = Math.min(weekIndex, weekCount - 1)
+  const visibleWeekIndex = Math.min(weekIndex, 4)
   const weekDates = useMemo(() => getWeekDates(year, monthIndex, visibleWeekIndex), [year, monthIndex, visibleWeekIndex])
-
-  const handleWeekCountChange = (count: 4 | 5) => {
-    setWeekCounts((previous) => {
-      const next = { ...previous, [monthKey]: count }
-      if (typeof window !== 'undefined') {
-        window.localStorage.setItem(WEEK_COUNT_STORAGE_KEY, JSON.stringify(next))
-      }
-      return next
-    })
-    setWeekIndex((previous) => Math.min(previous, count - 1))
-  }
 
   const handleYearSelect = (nextYear: number) => {
     setYear(nextYear)
@@ -584,7 +541,7 @@ function App() {
 
     if (currentIndex > 0) {
       setMonthIndex(monthOptions[currentIndex - 1])
-      setWeekIndex((weekCounts[`${year}-${String(monthOptions[currentIndex - 1] + 1).padStart(2, '0')}`] ?? 5) - 1)
+      setWeekIndex(4)
       return
     }
 
@@ -847,7 +804,7 @@ function App() {
         </header>
 
         <div className="month-week-selector" aria-label="Week selection">
-          {WEEK_POSITIONS.slice(0, weekCount).map((label, index) => (
+          {WEEK_POSITIONS.map((label, index) => (
             <button
               key={label}
               type="button"
@@ -857,16 +814,6 @@ function App() {
               {label}
             </button>
           ))}
-        </div>
-
-        <div className="week-count-selector" aria-label="Number of work weeks in this month">
-          <span>Weeks in this month</span>
-          <button type="button" className={weekCount === 4 ? 'nav-button active' : 'nav-button'} onClick={() => handleWeekCountChange(4)}>
-            4
-          </button>
-          <button type="button" className={weekCount === 5 ? 'nav-button active' : 'nav-button'} onClick={() => handleWeekCountChange(5)}>
-            5
-          </button>
         </div>
 
         <div className="day-grid">
