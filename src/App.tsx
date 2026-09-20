@@ -67,6 +67,10 @@ function parseDateKey(dateKey: string) {
   return new Date(year, month - 1, day)
 }
 
+function getWeekdayName(date: Date) {
+  return WEEKDAY_NAMES[(date.getDay() + 6) % 7]
+}
+
 function buildSampleTasks(): Task[] {
   return [
     {
@@ -411,13 +415,12 @@ function getDateInfoFromKey(dateKey: string) {
   const date = parseDateKey(dateKey)
   const dayNumber = date.getDate()
   const weekIndex = Math.min(4, Math.floor((dayNumber - 1) / 7))
-  const dayIndexInWeek = (dayNumber - 1) % 7
 
   return {
     year: date.getFullYear(),
     monthIndex: date.getMonth(),
     day: date.getDate(),
-    weekday: WEEKDAY_NAMES[dayIndexInWeek],
+    weekday: getWeekdayName(date),
     weekLabel: WEEK_POSITIONS[weekIndex],
     weekIndex,
   }
@@ -432,7 +435,7 @@ function getWeekDates(year: number, monthIndex: number, weekIndex: number): DayC
 
     return {
       dateKey: formatDateKey(currentDate),
-      label: WEEKDAY_NAMES[index],
+      label: getWeekdayName(currentDate),
       day: virtualDay,
       monthIndex: currentDate.getMonth(),
       year: currentDate.getFullYear(),
