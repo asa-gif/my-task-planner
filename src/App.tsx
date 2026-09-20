@@ -68,7 +68,7 @@ function parseDateKey(dateKey: string) {
 }
 
 function getWeekdayName(date: Date) {
-  return WEEKDAY_NAMES[(date.getDay() + 6) % 7]
+  return WEEKDAY_NAMES[(date.getDay() + 1) % 7]
 }
 
 function buildSampleTasks(): Task[] {
