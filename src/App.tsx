@@ -853,8 +853,8 @@ function App() {
 
         <div className="day-grid">
           {weekDates.map((day) => {
-            const visibleTasks = getVisibleTasksForDate(day.dateKey, tasks)
-            const isToday = day.dateKey === todayKey
+            const visibleTasks = day.isCurrentMonth ? getVisibleTasksForDate(day.dateKey, tasks) : []
+            const isToday = day.isCurrentMonth && day.dateKey === todayKey
 
             return (
               <section
@@ -862,17 +862,23 @@ function App() {
                 className={day.isCurrentMonth ? `day-card${isToday ? ' today' : ''}` : 'day-card muted'}
               >
                 <div className="day-header">
-                  <div>
-                    <p className="day-name">{day.label}</p>
-                    {isToday ? <span className="today-badge">Today</span> : null}
-                  </div>
-                  <button type="button" className="add-task-button" onClick={() => openAddTaskModal(day.dateKey)}>
-                    Add Task
-                  </button>
+                  {day.isCurrentMonth ? (
+                    <>
+                      <div>
+                        <p className="day-name">{day.label}</p>
+                        {isToday ? <span className="today-badge">Today</span> : null}
+                      </div>
+                      <button type="button" className="add-task-button" onClick={() => openAddTaskModal(day.dateKey)}>
+                        Add Task
+                      </button>
+                    </>
+                  ) : null}
                 </div>
 
                 <ul className="task-list">
-                  {visibleTasks.length === 0 ? <li className="empty-state">No tasks for this day</li> : null}
+                  {day.isCurrentMonth && visibleTasks.length === 0 ? (
+                    <li className="empty-state">No tasks for this day</li>
+                  ) : null}
                   {visibleTasks.map((task) => {
                     const completed = isTaskCompleted(task, day.dateKey)
                     const indicator = task.type === 'permanent' ? '🔁' : '•'
