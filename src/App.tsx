@@ -127,18 +127,39 @@ type DbCompletionRow = {
   completed: boolean
 }
 
-const TEMPORARY_SLOT_PREFIX = 'temporary-slot:'
-
-function getStoredTemporarySlot(row: DbTaskRow) {
-  if (row.task_date) {
-    return row.task_date
+function encodeTemporarySlot(slotKey: string) {
+  const match = slotKey.match(/^work:(\d{4})-(\d{2}):w([1-5]):d([1-7])$/)
+  if (!match) {
+    return null
   }
 
-  if (row.recurrence_week?.startsWith(TEMPORARY_SLOT_PREFIX)) {
-    return row.recurrence_week.slice(TEMPORARY_SLOT_PREFIX.length)
+  const [, year, month, week, day] = match
+  const encodedYear =
+    2100 + (Number(year) - 2026) * 60 + (Number(month) - 1) * 5 + Number(week) - 1
+  return `${encodedYear}-01-${day.padStart(2, '0')}`
+}
+
+function decodeTemporarySlot(taskDate: string | null) {
+  if (!taskDate) {
+    return undefined
   }
 
-  return undefined
+  const match = taskDate.match(/^(\d{4})-01-0([1-7])$/)
+  if (!match) {
+    return taskDate
+  }
+
+  const [, encodedYear, day] = match
+  const encodedOffset = Number(encodedYear) - 2100
+  if (encodedOffset < 0) {
+    return taskDate
+  }
+
+  const appYear = 2026 + Math.floor(encodedOffset / 60)
+  const monthSlot = encodedOffset % 60
+  const monthIndex = Math.floor(monthSlot / 5)
+  const weekIndex = monthSlot % 5
+  return getWorkSlotKey(appYear, monthIndex, weekIndex, Number(day) - 1)
 }
 
 function readTasksFromLocalStorage(): Task[] {
@@ -195,7 +216,7 @@ async function loadTasksFromSupabase(): Promise<Task[]> {
       id: row.id,
       title: row.title,
       type: row.type,
-      dateKey: row.type === 'temporary' ? getStoredTemporarySlot(row) : undefined,
+      dateKey: row.type === 'temporary' ? decodeTemporarySlot(row.task_date) : undefined,
       recurrenceKey:
         row.type === 'permanent' && row.recurrence_week && row.recurrence_day
           ? `${row.recurrence_week}|${row.recurrence_day}`
@@ -275,13 +296,9 @@ async function syncTasksToSupabase(tasks: Task[]) {
     id: task.id,
     title: task.title,
     type: task.type,
-    task_date: null,
+    task_date: task.type === 'temporary' && task.dateKey ? encodeTemporarySlot(task.dateKey) : null,
     recurrence_week:
-      task.type === 'temporary'
-        ? `${TEMPORARY_SLOT_PREFIX}${task.dateKey ?? ''}`
-        : task.recurrenceKey
-          ? task.recurrenceKey.split('|')[0]
-          : null,
+      task.type === 'permanent' && task.recurrenceKey ? task.recurrenceKey.split('|')[0] : null,
     recurrence_day:
       task.type === 'permanent' && task.recurrenceKey ? task.recurrenceKey.split('|')[1] : null,
   }))
