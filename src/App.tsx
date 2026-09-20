@@ -127,6 +127,20 @@ type DbCompletionRow = {
   completed: boolean
 }
 
+const TEMPORARY_SLOT_PREFIX = 'temporary-slot:'
+
+function getStoredTemporarySlot(row: DbTaskRow) {
+  if (row.task_date) {
+    return row.task_date
+  }
+
+  if (row.recurrence_week?.startsWith(TEMPORARY_SLOT_PREFIX)) {
+    return row.recurrence_week.slice(TEMPORARY_SLOT_PREFIX.length)
+  }
+
+  return undefined
+}
+
 function readTasksFromLocalStorage(): Task[] {
   if (typeof window === 'undefined') {
     return []
@@ -181,7 +195,7 @@ async function loadTasksFromSupabase(): Promise<Task[]> {
       id: row.id,
       title: row.title,
       type: row.type,
-      dateKey: row.type === 'temporary' ? row.task_date ?? undefined : undefined,
+      dateKey: row.type === 'temporary' ? getStoredTemporarySlot(row) : undefined,
       recurrenceKey:
         row.type === 'permanent' && row.recurrence_week && row.recurrence_day
           ? `${row.recurrence_week}|${row.recurrence_day}`
@@ -261,9 +275,13 @@ async function syncTasksToSupabase(tasks: Task[]) {
     id: task.id,
     title: task.title,
     type: task.type,
-    task_date: task.type === 'temporary' ? task.dateKey ?? null : null,
+    task_date: null,
     recurrence_week:
-      task.type === 'permanent' && task.recurrenceKey ? task.recurrenceKey.split('|')[0] : null,
+      task.type === 'temporary'
+        ? `${TEMPORARY_SLOT_PREFIX}${task.dateKey ?? ''}`
+        : task.recurrenceKey
+          ? task.recurrenceKey.split('|')[0]
+          : null,
     recurrence_day:
       task.type === 'permanent' && task.recurrenceKey ? task.recurrenceKey.split('|')[1] : null,
   }))
