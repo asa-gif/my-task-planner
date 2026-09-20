@@ -127,7 +127,7 @@ type DbCompletionRow = {
   completed: boolean
 }
 
-function encodeTemporarySlot(slotKey: string) {
+function encodeWorkSlot(slotKey: string) {
   const match = slotKey.match(/^work:(\d{4})-(\d{2}):w([1-5]):d([1-7])$/)
   if (!match) {
     return null
@@ -139,20 +139,20 @@ function encodeTemporarySlot(slotKey: string) {
   return `${encodedYear}-01-${day.padStart(2, '0')}`
 }
 
-function decodeTemporarySlot(taskDate: string | null) {
-  if (!taskDate) {
+function decodeStoredWorkSlot(storedValue: string | null) {
+  if (!storedValue) {
     return undefined
   }
 
-  const match = taskDate.match(/^(\d{4})-01-0([1-7])$/)
+  const match = storedValue.match(/^(\d{4})-01-0([1-7])$/)
   if (!match) {
-    return taskDate
+    return storedValue
   }
 
   const [, encodedYear, day] = match
   const encodedOffset = Number(encodedYear) - 2100
   if (encodedOffset < 0) {
-    return taskDate
+    return storedValue
   }
 
   const appYear = 2026 + Math.floor(encodedOffset / 60)
@@ -216,7 +216,7 @@ async function loadTasksFromSupabase(): Promise<Task[]> {
       id: row.id,
       title: row.title,
       type: row.type,
-      dateKey: row.type === 'temporary' ? decodeTemporarySlot(row.task_date) : undefined,
+      dateKey: row.type === 'temporary' ? decodeStoredWorkSlot(row.task_date) : undefined,
       recurrenceKey:
         row.type === 'permanent' && row.recurrence_week && row.recurrence_day
           ? `${row.recurrence_week}|${row.recurrence_day}`
@@ -234,7 +234,10 @@ async function loadTasksFromSupabase(): Promise<Task[]> {
       return
     }
 
-    task.exceptions[row.exception_date] = true
+    const exceptionKey = decodeStoredWorkSlot(row.exception_date)
+    if (exceptionKey) {
+      task.exceptions[exceptionKey] = true
+    }
   })
 
   ;(completionRows ?? []).forEach((row: DbCompletionRow) => {
@@ -243,7 +246,10 @@ async function loadTasksFromSupabase(): Promise<Task[]> {
       return
     }
 
-    task.completionByDate[row.occurrence_date] = true
+    const completionKey = decodeStoredWorkSlot(row.occurrence_date)
+    if (completionKey) {
+      task.completionByDate[completionKey] = true
+    }
   })
 
   return Array.from(taskMap.values())
@@ -296,7 +302,7 @@ async function syncTasksToSupabase(tasks: Task[]) {
     id: task.id,
     title: task.title,
     type: task.type,
-    task_date: task.type === 'temporary' && task.dateKey ? encodeTemporarySlot(task.dateKey) : null,
+    task_date: task.type === 'temporary' && task.dateKey ? encodeWorkSlot(task.dateKey) : null,
     recurrence_week:
       task.type === 'permanent' && task.recurrenceKey ? task.recurrenceKey.split('|')[0] : null,
     recurrence_day:
@@ -313,7 +319,7 @@ async function syncTasksToSupabase(tasks: Task[]) {
       .filter(([, enabled]) => enabled)
       .map(([date]) => ({
         task_id: task.id,
-        exception_date: date,
+        exception_date: encodeWorkSlot(date) ?? date,
         action: 'hidden',
       })),
   )
@@ -323,7 +329,7 @@ async function syncTasksToSupabase(tasks: Task[]) {
       .filter(([, completed]) => completed)
       .map(([date]) => ({
         task_id: task.id,
-        occurrence_date: date,
+        occurrence_date: encodeWorkSlot(date) ?? date,
         completed: true,
       })),
   )
@@ -378,7 +384,7 @@ async function deleteTaskFromSupabase(task: Task, dateKey: string, mode: 'tempor
     const { error } = await supabase.from('task_exceptions').upsert(
       {
         task_id: task.id,
-        exception_date: dateKey,
+        exception_date: encodeWorkSlot(dateKey) ?? dateKey,
         action: 'hidden',
       },
       { onConflict: 'task_id,exception_date' },
