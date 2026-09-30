@@ -162,6 +162,20 @@ function decodeStoredWorkSlot(storedValue: string | null) {
   return getWorkSlotKey(appYear, monthIndex, weekIndex, Number(day) - 1)
 }
 
+function getSupabaseErrorMessage(error: unknown) {
+  if (error instanceof Error) {
+    return error.message
+  }
+
+  if (error && typeof error === 'object' && 'message' in error) {
+    const details = 'details' in error && typeof error.details === 'string' ? ` ${error.details}` : ''
+    const code = 'code' in error && typeof error.code === 'string' ? ` (${error.code})` : ''
+    return `${String(error.message)}${code}${details}`
+  }
+
+  return 'Could not delete the task. Check the Supabase task_exceptions permissions.'
+}
+
 function readTasksFromLocalStorage(): Task[] {
   if (typeof window === 'undefined') {
     return []
@@ -381,17 +395,25 @@ async function syncTasksToSupabase(tasks: Task[]) {
 
 async function deleteTaskFromSupabase(task: Task, dateKey: string, mode: 'temporary' | 'permanent') {
   if (task.type === 'permanent' && mode === 'temporary') {
-    const { error } = await supabase.from('task_exceptions').upsert(
-      {
-        task_id: task.id,
-        exception_date: encodeWorkSlot(dateKey) ?? dateKey,
-        action: 'hidden',
-      },
-      { onConflict: 'task_id,exception_date' },
-    )
+    const exceptionDate = encodeWorkSlot(dateKey) ?? dateKey
+    const { error: removeExistingError } = await supabase
+      .from('task_exceptions')
+      .delete()
+      .eq('task_id', task.id)
+      .eq('exception_date', exceptionDate)
 
-    if (error) {
-      throw error
+    if (removeExistingError) {
+      throw removeExistingError
+    }
+
+    const { error: insertExceptionError } = await supabase.from('task_exceptions').insert({
+      task_id: task.id,
+      exception_date: exceptionDate,
+      action: 'hidden',
+    })
+
+    if (insertExceptionError) {
+      throw insertExceptionError
     }
 
     return
@@ -699,7 +721,7 @@ function App() {
 
       setDeleteTarget(null)
     } catch (error) {
-      setDeleteError(error instanceof Error ? error.message : 'Could not delete the task.')
+      setDeleteError(getSupabaseErrorMessage(error))
     } finally {
       setIsDeleting(false)
     }
