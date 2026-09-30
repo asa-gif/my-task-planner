@@ -328,16 +328,6 @@ async function syncTasksToSupabase(tasks: Task[]) {
     throw taskError
   }
 
-  const exceptionRows = tasks.flatMap((task) =>
-    Object.entries(task.exceptions)
-      .filter(([, enabled]) => enabled)
-      .map(([date]) => ({
-        task_id: task.id,
-        exception_date: encodeWorkSlot(date) ?? date,
-        action: 'hidden',
-      })),
-  )
-
   const completionRows = tasks.flatMap((task) =>
     Object.entries(task.completionByDate)
       .filter(([, completed]) => completed)
@@ -349,15 +339,6 @@ async function syncTasksToSupabase(tasks: Task[]) {
   )
 
   if (taskIds.size > 0) {
-    const { error: deleteExceptionsError } = await supabase
-      .from('task_exceptions')
-      .delete()
-      .in('task_id', Array.from(taskIds))
-
-    if (deleteExceptionsError) {
-      throw deleteExceptionsError
-    }
-
     const { error: deleteCompletionsError } = await supabase
       .from('task_completions')
       .delete()
@@ -365,16 +346,6 @@ async function syncTasksToSupabase(tasks: Task[]) {
 
     if (deleteCompletionsError) {
       throw deleteCompletionsError
-    }
-  }
-
-  if (exceptionRows.length > 0) {
-    const { error: exceptionError } = await supabase.from('task_exceptions').upsert(exceptionRows, {
-      onConflict: 'task_id,exception_date',
-    })
-
-    if (exceptionError) {
-      throw exceptionError
     }
   }
 
@@ -396,14 +367,19 @@ async function syncTasksToSupabase(tasks: Task[]) {
 async function deleteTaskFromSupabase(task: Task, dateKey: string, mode: 'temporary' | 'permanent') {
   if (task.type === 'permanent' && mode === 'temporary') {
     const exceptionDate = encodeWorkSlot(dateKey) ?? dateKey
-    const { error: removeExistingError } = await supabase
+    const { data: existingException, error: findExceptionError } = await supabase
       .from('task_exceptions')
-      .delete()
+      .select('task_id')
       .eq('task_id', task.id)
       .eq('exception_date', exceptionDate)
+      .maybeSingle()
 
-    if (removeExistingError) {
-      throw removeExistingError
+    if (findExceptionError) {
+      throw findExceptionError
+    }
+
+    if (existingException) {
+      return
     }
 
     const { error: insertExceptionError } = await supabase.from('task_exceptions').insert({
